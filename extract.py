@@ -1,9 +1,10 @@
 import os
-import boto3
+import sys
 import requests
-from moto import mock_s3
-from S3_handler import S3Handler
-from zipfile import ZipFile
+import logging
+
+module_logger = logging.getLogger('etl_application.extract')
+
 
 class Extract:
     def __init__(self, url, file_name, bucket_name, path):
@@ -11,66 +12,53 @@ class Extract:
         self.file_name = file_name
         self.bucket_name = bucket_name
         self.path = path
+        self.logger = logging.getLogger('etl_application.extract.Extract')
+        self.logger.info('creating an instance of Extract')
 
-    @mock_s3
-    def test_my_model_save(self):
-        try:
-            conn = boto3.resource('s3', region_name='us-east-1')
-            conn.create_bucket(Bucket=self.bucket_name)
-
-            model_instance = S3Handler(self.bucket_name, self.file_name, 'miguel', 'is awesome')
-            model_instance.save()
-
-            body = conn.Object(self.bucket_name, 'miguel').get()[
-                'Body'].read().decode("utf-8")
-
-            print("put success")
-            assert body == 'is awesome'
-        except Exception as e:
-            print('error : ', e)
-
-    def download_url(self):
-
-        print(f"Extracting file {self.file_name} from {self.url} \n")
+    def download_url(self: object) -> None:
+        """
+        Download file from URL, no ssl verification
+        :return: None
+        """
+        self.logger.info(f"\t Downloading file {self.file_name} from {self.url} ")
         zip_file = os.path.join(self.path, self.file_name)
 
         try:
             if not os.path.exists(self.path):
                 os.makedirs(self.path)
 
-            r = requests.get(self.url, verify=False, timeout=3)
-            r.raise_for_status()
+            with open(zip_file, 'wb') as f:
+                self.logger.info(f"\t - Request {zip_file}")
+                response = requests.get(self.url,
+                                        verify=False,
+                                        timeout=3,
+                                        stream=True)
+                response.raise_for_status()
+                total = response.headers.get('content-length')
 
-            if r.status_code == 200:
-               open(zip_file, 'wb').write(r.content)
+                if total is None:
+                    f.write(response.content)
+                else:
+                    if response.status_code == 200:
+                        downloaded = 0
+                        total = int(total)
+                        for data in response.iter_content(chunk_size=max(int(total / 1000), 1024 * 1024)):
+                            downloaded += len(data)
+                            f.write(data)
+                            done = int(50 * downloaded / total)
+                            self.logger.info('\r[{}{}]'.format('█' * done, '.' * (50 - done)))
+                            sys.stdout.write('\r[{}{}]'.format('█' * done, '.' * (50 - done)))
+                            sys.stdout.flush()
+                        print('\n')
 
-               with ZipFile(zip_file, 'r') as zipObj:
-                   zipObj.extractall(self.path)
+                    else:
+                        self.logger.info('Web site does not exist')
 
-               print(f"file {zip_file} successfully extracted \n")
-
-            else:
-                print('Web site does not exist')
-        except requests.exceptions.RequestException as err:
-            print("Exception: Other Errors: ", err)
-        except requests.exceptions.HTTPError as errh:
-            print("Http Error:", errh)
-        except requests.exceptions.ConnectionError as errc:
-            print("Error Connecting:", errc)
-        except requests.exceptions.Timeout as errt:
-            print("Timeout Error:", errt)
-
-    @mock_s3
-    def upload_s3(self):
-        print(f"Uploading file {self.file_name} to s3 bucket {self.bucket_name} \n ")
-        try:
-            s3_client = boto3.client('s3')
-            s3_client.create_bucket(Bucket='S3_bucket')
-            s3_handler = S3Handler('S3_bucket', 'PPR_ALL.zip')
-            s3_handler.upload_s3()
-            print("upload successful \n ")
-        except:
-            print("error: ")
-
-
-
+        except (ValueError, requests.exceptions.Timeout):
+            self.logger.exception("Timeout Error:", exc_info=True)
+        except (ValueError, requests.exceptions.ConnectionError):
+            self.logger.exception("Error Connecting:", exc_info=True)
+        except (ValueError, requests.exceptions.HTTPError):
+            self.logger.exception("Http Error:", exc_info=True)
+        except (ValueError, requests.exceptions.RequestException):
+            self.logger.exception("Exception: Other Errors: ", exc_info=True)
